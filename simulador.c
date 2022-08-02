@@ -1,11 +1,21 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
+#include <time.h>
 //!--------------------------------------- Costantes-----------------------------------------------------------------------------------------------
-#define UTILIZACAO 0.2    // taxa de utilização da fila (rho)
-#define TAXA_DE_SERVICO 1 // taxa da variável do serviço(mi)
+#define UTILIZACAO 0.2      // taxa de utilização da fila (rho)
+#define TAXA_DE_SERVICO 1   // taxa da variável do serviço(mi)
+#define NUMERO_RODADAS 3200 // Quantidade de rodadas durante a simulação
+#define TAM_RODADA 10       // quantidade de clientes atendidos numa rodada
 
 #define INSERCAO 1
 #define REMOCAO 2
+
+#define CHEGADA 1
+#define TERMINO_SERVICO 2
+
+#define FCFS 1
+#define LCFS 2
 
 //!-------------------------------------- Estruturas--------------------------------------------------------------------------------------------
 
@@ -27,10 +37,10 @@ typedef struct heap_de_eventos
 
 typedef struct cliente
 {
-    int id;
+    int rodada_origem;
     double tempo_chegada;
     double tempo_espera;
-    double tempo_serviço;
+    double tempo_servico;
 } Cliente;
 
 typedef struct mm1
@@ -39,18 +49,55 @@ typedef struct mm1
     Cliente *servidor;
     int prox_cliente_id;
     int tamanho_fila_de_espera;
-    int numero_elementos;
+    int numero_elementos_na_fila_de_espera;
+    int proximo_a_ser_servido;
+    int pos_proxima_insercao;
     double utilizacao;
     double taxa_servico;
 } Fila_m_m_1;
 
+typedef struct rodada
+{
+    double tempo_inicio;
+    double tempo_total;
+    double media_estimada_tempo_espera;
+    double variancia_estimada_tempo_espera;
+    double *pmf_rodada;
+} Rodada;
+
+typedef struct estrutura_aux_pmf
+{
+    int tam_vetor_aux_pmf;
+    double *vetor_aux_pmf;
+    double tempo_ultima_alteracao_na_fila_espera;
+} Aux_pmf;
+
 //!--------------------------------- Variáveis globais-------------------------------------------------------------------------------
-double tempo_atual = 0.0; // tempo de simulação
+short disciplina;
+int numero_rodada_atual = 0;
+double tempo_atual = 0.0;
+
+double somatorio_tempo_espera = 0.0;
+double somatorio_tempo_espera_ao_quadrado = 0.0;
 Heap *lista_eventos;
 Fila_m_m_1 *fila;
+Rodada **rodadas, *rodada_atual;
+Aux_pmf *auxiliar_calculo_pmf;
+//!-------------------------------------------------Funções de Geração de Amostra------------------------------------------------------------------------------------------------//
 
-//!--------------------------------- Funções de Tratamento de Evento--------------------------------------------------------------
+// Atribui uma nova seed ao gerador de números aleatórios
+void randomizar(double seed)
+{
+    srand(seed);
+}
 
+// cria uma amostra exponencial
+double gerar_amostra_exponencial()
+{
+    double uniforme = rand() / (double)RAND_MAX;
+    return (double)log(uniforme) / (-UTILIZACAO);
+}
+//!-------------------------------------------------Funções de Tratamento de Evento----------------------------------------------------------------------------------------------//
 // cria uma instancia de evento
 void criar_evento(int tempo, int tipo, Evento **evento)
 {
@@ -287,53 +334,249 @@ void criar_fila(int tam, Fila_m_m_1 **fila)
     (*fila)->fila_de_espera = (Cliente **)malloc(tam * sizeof(Cliente *));
     (*fila)->prox_cliente_id = 1;
     (*fila)->tamanho_fila_de_espera = tam;
-    (*fila)->numero_elementos = 0;
+    (*fila)->numero_elementos_na_fila_de_espera = 0;
+    (*fila)->pos_proxima_insercao = 0;
+    (*fila)->proximo_a_ser_servido = 0;
     (*fila)->servidor = NULL;
     (*fila)->taxa_servico = TAXA_DE_SERVICO;
     (*fila)->utilizacao = UTILIZACAO;
+}
+
+// verifica se há espaço para iserção na fila de espera
+short fila_de_espera_cheia(Fila_m_m_1 *fila)
+{
+    return fila->pos_proxima_insercao == fila->tamanho_fila_de_espera;
+}
+
+// verifica se há alguém na fila de espera
+short alguem_na_espera(Fila_m_m_1 *fila)
+{
+    if (disciplina == FCFS)
+    {
+        return fila->pos_proxima_insercao != fila->proximo_a_ser_servido;
+    }
+    else
+    {
+        return fila->proximo_a_ser_servido >= 0;
+    }
 }
 
 // aloca mais espaço para a fila de espera
 void realoca_fila_de_espera(Fila_m_m_1 *fila)
 {
     Cliente **nova_lista;
-    fila->tamanho_fila_de_espera = 2 * fila->tamanho_fila_de_espera;// aumenta o tamanho da lista
+    fila->tamanho_fila_de_espera = 2 * fila->tamanho_fila_de_espera; // aumenta o tamanho da lista
 
     nova_lista = (Cliente **)malloc(fila->tamanho_fila_de_espera * sizeof(Cliente *));
     // tranfere os clientes para a nova fila;
-    for (size_t i = 0; i < fila->tamanho_fila_de_espera/2; i++)
+    for (size_t i = 0; i < fila->tamanho_fila_de_espera / 2; i++)
     {
         nova_lista[i] = fila->fila_de_espera[i];
     }
     free(fila->fila_de_espera);
     fila->fila_de_espera = nova_lista;
 }
-int main(int argc, char const *argv[])
+
+// insere uma nova chegada na fila de espera
+void insere_na_fila(Cliente *chegada, Fila_m_m_1 *fila)
 {
-    Heap *teste;
-    Evento *teste2;
-
-    inicializa_heap(10, &teste);
-    for (size_t i = 0; i < 10; i++)
+    fila->fila_de_espera[fila->pos_proxima_insercao] = chegada;
+    fila->pos_proxima_insercao++;
+    if (disciplina == LCFS)
     {
+        fila->proximo_a_ser_servido = fila->pos_proxima_insercao - 1; // o próximo a ser servido é o elemento que acabou de ser inserido
+    }
 
-        int t;
-        scanf("%d", &t);
+    fila->numero_elementos_na_fila_de_espera++;
+}
 
-        criar_evento(t, 0, &teste2);
+// verifica se há alguém no servidor
+short is_fila_ocupada(Fila_m_m_1 *fila)
+{
+    return fila->servidor != NULL;
+}
 
-        inserir_evento(teste2, teste);
+// retorna o primeiro elemento da fila de espera, ou seja, o próximo a ser servido
+Cliente *buscar_na_fila_de_espera(Fila_m_m_1 *fila)
+{
+    Cliente *primeiro_da_fila;
+    primeiro_da_fila = fila->fila_de_espera[fila->proximo_a_ser_servido];
+    if (disciplina == LCFS)
+    {
+        fila->pos_proxima_insercao = fila->proximo_a_ser_servido;
+        fila->proximo_a_ser_servido--;
+    }
+    else
+    {
+        fila->proximo_a_ser_servido++;
+    }
 
-        for (size_t j = 0; j < teste->ultimo_index_preenchido + 1; j++)
+    return primeiro_da_fila;
+}
+
+// no caso de uma fila de espera vazia o cliente vai diretamente ao servidor
+void insercao_direta_no_servidor(Cliente *chegada, Fila_m_m_1 *fila)
+{
+    fila->servidor = chegada;
+}
+
+// O cliente no servidor vai embora da fila
+void termino_de_servico(Fila_m_m_1 *fila)
+{
+    fila->servidor = NULL;
+}
+//!-----------------------------------------------------------Funções de Cliente-------------------------------------------------------------------------------------------------//
+
+// cria instancia de cliente
+void criar_cliente(Cliente **cliente, double tempo_chegada)
+{
+    (*cliente) = (Cliente *)malloc(sizeof(Cliente *));
+    (*cliente)->rodada_origem = numero_rodada_atual;
+    (*cliente)->tempo_chegada = tempo_chegada;
+}
+//!-----------------------------------------------------------Funções de Simulação-----------------------------------------------------------------------------------------------//
+
+// inicializa uma estrutura para armazenar informações sobre a rodada atual;
+void criar_rodada(Rodada **nova_rodada)
+{
+    (*nova_rodada) = (Rodada *)malloc(sizeof(Rodada *));
+    (*nova_rodada)->tempo_inicio = tempo_atual;
+}
+
+void alocar_mais_espaco_vetor_auxiliar_pmf(Aux_pmf *auxiliar)
+{
+    double *temp;
+    auxiliar->tam_vetor_aux_pmf = 2 * auxiliar->tam_vetor_aux_pmf;
+    temp = (double *)malloc(auxiliar->tam_vetor_aux_pmf * sizeof(double));
+    for (size_t i = 0; i < auxiliar->tam_vetor_aux_pmf; i++)
+    {
+        if (i < auxiliar->tam_vetor_aux_pmf / 2)
         {
-            printf("%d ", teste->lista[j]->tempo_de_ocorrencia);
+            temp[i] = auxiliar->vetor_aux_pmf[i];
+        }
+        else
+        {
+            temp[i] = 0.0;
         }
     }
-    remover_evento(teste);
-    for (size_t j = 0; j < teste->ultimo_index_preenchido + 1; j++)
-    {
-        printf("\n%d ", teste->lista[j]->tempo_de_ocorrencia);
-    }
+    free(auxiliar->vetor_aux_pmf);
+    auxiliar->vetor_aux_pmf = temp;
+}
 
-    return 0;
+void calculo_pmf()
+{
+    double intervalo_tempo = tempo_atual - auxiliar_calculo_pmf->tempo_ultima_alteracao_na_fila_espera;
+    if (fila->numero_elementos_na_fila_de_espera > auxiliar_calculo_pmf->tam_vetor_aux_pmf)
+    {
+        alocar_mais_espaco_vetor_auxiliar_pmf(auxiliar_calculo_pmf);
+    }
+    auxiliar_calculo_pmf->vetor_aux_pmf[fila->numero_elementos_na_fila_de_espera] += intervalo_tempo;
+    auxiliar_calculo_pmf->tempo_ultima_alteracao_na_fila_espera = tempo_atual;
+}
+
+// cria um evento de chegada e o adiciona na heap de eventos
+void nova_chegada()
+{
+    Evento *chegada;
+    double instante_chegada = tempo_atual + gerar_amostra_exponencial(); // o tempo de chegadas é uma exponencial
+    criar_evento(instante_chegada, CHEGADA, &chegada);                   // cria  evento
+    inserir_evento(chegada, lista_eventos);                              // insere o evento na heap de eventos
+}
+
+// cria um evento de termino de serviço e o adiciona na heap de eventos
+void novo_servico()
+{
+    Evento *novo_termino_servico;
+
+    double instante_termino = tempo_atual + gerar_amostra_exponencial();    // serviço com duração exponencial
+    criar_evento(instante_termino, TERMINO_SERVICO, &novo_termino_servico); // cria o evento de termino do serviço
+    inserir_evento(novo_termino_servico, lista_eventos);                    // insere o evento na heap de eventos
+}
+
+// resolve um evento de chegada na fila
+void tratar_evento_chegada()
+{
+    Cliente *novo_cliente;
+    calculo_pmf();
+    criar_cliente(&novo_cliente, tempo_atual); // instancia o novo cliente da fila
+    if (!is_fila_ocupada(fila))                // se a fila estiver vazia
+    {
+        insercao_direta_no_servidor(novo_cliente, fila);
+    }
+    else
+    {
+        insere_na_fila(novo_cliente, fila); // cliente vai para fila de espera
+    }
+    // TODO calculo da pmf
+    nova_chegada(); // a próxima chegada é gerada enquanto tratamos a anterior
+}
+
+void tratar_evento_termino_servico()
+{
+    termino_de_servico(fila); // cliente no servidor termina seu
+    calculo_pmf();
+    if (alguem_na_espera(fila))
+    {
+        Cliente *proximo_servido;                                  // proximo cliente a ser servido
+        proximo_servido = buscar_na_fila_de_espera(fila);          // pega o primeiro da fila de espera
+        if (proximo_servido->rodada_origem == numero_rodada_atual) // calcula as métricas de tempo de espera apenas se o cliente chegou nessa rodada
+        {
+            proximo_servido->tempo_espera = tempo_atual - proximo_servido->tempo_chegada;                          // calcula o tempo de espera
+            somatorio_tempo_espera += proximo_servido->tempo_espera;                                               // calculo incremental do tempo de espera médio
+            somatorio_tempo_espera_ao_quadrado += (proximo_servido->tempo_espera * proximo_servido->tempo_espera); // calculo incremental da variancia do tempo de espera
+        }
+        novo_servico();
+    }
+}
+
+// ao fim de uma rodada calcula as metricas de tempo médio de espera e numero médio de pessoas na fila de espera
+void calculo_das_metricas()
+{
+    double duracao_rodada, *temp;
+    rodada_atual->media_estimada_tempo_espera = somatorio_tempo_espera / TAM_RODADA; // calculo do tempo de espera médio
+    rodada_atual->variancia_estimada_tempo_espera = (somatorio_tempo_espera_ao_quadrado / (TAM_RODADA - 1)) + (somatorio_tempo_espera * somatorio_tempo_espera) / (TAM_RODADA * (TAM_RODADA - 1));
+    duracao_rodada = tempo_atual - rodada_atual->tempo_inicio;
+
+    // TODO pmf
+}
+
+void criar_estrutura_auxiliar_pmf(Aux_pmf **auxiliar)
+{
+    (*auxiliar) = (Aux_pmf *)malloc(sizeof(Aux_pmf *));
+    (*auxiliar)->tam_vetor_aux_pmf = TAM_RODADA;
+    (*auxiliar)->tempo_ultima_alteracao_na_fila_espera = tempo_atual;
+    (*auxiliar)->vetor_aux_pmf = (double *)malloc((*auxiliar)->tam_vetor_aux_pmf * sizeof(double));
+    for (size_t i = 0; i < (*auxiliar)->tam_vetor_aux_pmf; i++)
+    {
+        (*auxiliar)->vetor_aux_pmf[i] = 0.0;
+    }
+}
+void simulacao()
+{
+    Evento *proximo_evento; // proximo evento a ser tratado
+    criar_estrutura_auxiliar_pmf(&auxiliar_calculo_pmf);
+    rodadas = (Rodada **)malloc(NUMERO_RODADAS * sizeof(Rodada *)); // inicializa vetor que guarda informação sobre todas as rodadas
+    nova_chegada();                                                 // primeira chegada da simulação
+    while (numero_rodada_atual < NUMERO_RODADAS)                    // simulação roda por NUMERO_RODADAS rodadas
+    {
+        criar_rodada(&rodada_atual);                       // inicializa a estrutura  que armazena as informações da rodada atual
+        rodadas[numero_rodada_atual] = rodada_atual;       // guarda  a estrutura no vetor de rodadas
+        proximo_evento = remover_evento(lista_eventos);    // pega o próximo evento da heap de eventos
+        tempo_atual = proximo_evento->tempo_de_ocorrencia; // o tempo da simulaçao é avanaçado até o tempo do próximo evento
+        switch (proximo_evento->tipo)                      // trata o evento de acordo com seu tipo
+        {
+        case CHEGADA:
+            tratar_evento_chegada();
+            break;
+
+        case TERMINO_SERVICO:
+            tratar_evento_termino_servico();
+            break;
+        default:
+            puts("ERRO");
+        }
+    }
+}
+int main(int argc, char const *argv[])
+{
 }
